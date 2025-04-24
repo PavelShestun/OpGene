@@ -13,11 +13,11 @@ import statistics
 import logging
 from typing import List, Tuple, Dict, Union, Optional
 from math import log, exp
-from Bio import SeqIO
+from Bio import SeqIO, Entrez
 from Bio.Data import CodonTable
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
-from multiprocessing import Pool
+from multiprocessing import Pool, cpu_count
 from collections import OrderedDict
 import psutil
 
@@ -26,14 +26,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Константы ---
+FALLBACK_ORGANISM = "Escherichia coli K-12"
+FALLBACK_ORGANISM_ID = "83333"
 FALLBACK_FASTA_FILENAME = "E_coli_K12_MG1655.fna"
-FALLBACK_ORGANISM_ID = "ecoli_k12"
-CPS_TABLE_FILENAME = "ecoli_k12_cps.json"
+CPS_TABLE_FILENAME = "cps_table.json"
 OUTPUT_DIR = "optimization_results"
 DATA_DIR = "data"
 CONFIG_FILE = "config.json"
 
-# Таблица использования кодонов по умолчанию (E. coli K-12 MG1655, приблизительная)
+# Таблица использования кодонов по умолчанию (E. coli K-12 MG1655)
 DEFAULT_CODON_USAGE = {
     'TTT': 0.026, 'TTC': 0.016, 'TTA': 0.013, 'TTG': 0.013, 'CTT': 0.011, 'CTC': 0.010,
     'CTA': 0.004, 'CTG': 0.050, 'ATT': 0.030, 'ATC': 0.024, 'ATA': 0.007, 'ATG': 0.027,
@@ -62,18 +63,18 @@ class ConfigurationManager:
                 "RbsSpecification": 0.5
             },
             "ma_parameters": {
-                "population_size": 10,  # Уменьшено для ускорения
-                "num_generations": 5,   # Уменьшено для ускорения
+                "population_size": 10,
+                "num_generations": 5,
                 "crossover_rate": 0.85,
-                "mutation_rate": 0.06,  # Увеличено для лучшего поиска
+                "mutation_rate": 0.06,
                 "tournament_size": 4,
                 "elitism_count": 2,
-                "local_search_steps": 3  # Уменьшено для ускорения
+                "local_search_steps": 3
             },
             "rna_folding": {
                 "window_size": 40,
-                "bad_mfe_threshold": -12.0,
-                "ideal_mfe_threshold": -4.0
+                "bad_mfe": -12.0,
+                "ideal_mfe": -4.0
             },
             "cpb_parameters": {
                 "sigmoid_k": 3.0,
@@ -82,7 +83,8 @@ class ConfigurationManager:
             "target_gc_range": [0.45, 0.55],
             "avoid_motifs": [
                 "AATAAA", "GATC", "TATAAT", "GGGGGG", "CCCCCC", "AAAAAA", "TTTTTT"
-            ]
+            ],
+            "default_codon_table": 11
         }
 
     def load_config(self) -> Dict:
@@ -95,6 +97,14 @@ class ConfigurationManager:
                 def merge_dicts(default, custom):
                     for key, value in custom.items():
                         if isinstance(value, dict) and key in default:
+                            # Переименование устаревших ключей в rna_folding
+                            if key == "rna_folding":
+                                if "bad_mfe_threshold" in value:
+                                    value["bad_mfe"] = value.pop("bad_mfe_threshold")
+                                    logger.warning("Ключ 'bad_mfe_threshold' устарел. Используйте 'bad_mfe'.")
+                                if "ideal_mfe_threshold" in value:
+                                    value["ideal_mfe"] = value.pop("ideal_mfe_threshold")
+                                    logger.warning("Ключ 'ideal_mfe_threshold' устарел. Используйте 'ideal_mfe'.")
                             default[key] = merge_dicts(default[key], value)
                         else:
                             default[key] = value
@@ -110,10 +120,13 @@ class ConfigurationManager:
 
 # --- Менеджер ресурсов ---
 class ResourceManager:
-    def __init__(self, data_dir: str = DATA_DIR, organism_id: str = FALLBACK_ORGANISM_ID):
-        self.data_dir = data_dir
+    def __init__(self, organism: str = FALLBACK_ORGANISM, organism_id: str = FALLBACK_ORGANISM_ID, 
+                 data_dir: str = DATA_DIR, codon_table_id: int = 11):
+        self.organism = organism
         self.organism_id = organism_id
-        self.fasta_path = os.path.join(data_dir, FALLBACK_FASTA_FILENAME)
+        self.data_dir = data_dir
+        self.codon_table_id = codon_table_id
+        self.fasta_path = os.path.join(data_dir, f"{organism.replace(' ', '_')}.fna")
         self.cps_path = os.path.join(data_dir, CPS_TABLE_FILENAME)
         os.makedirs(data_dir, exist_ok=True)
         self.entrez_email = self._get_entrez_email()
@@ -122,44 +135,196 @@ class ResourceManager:
     def _get_entrez_email(self) -> str:
         email = os.getenv("ENTREZ_EMAIL", None)
         if not email:
-            logger.info("Email для Entrez не указан. Используется таблица кодонов по умолчанию.")
+            raise ValueError("Email для Entrez не указан. Установите переменную окружения ENTREZ_EMAIL.")
         return email
 
     def _download_fasta_if_needed(self):
-        if not os.path.exists(self.fasta_path):
-            logger.info(f"FASTA файл не найден по пути {self.fasta_path}. Загружаем...")
-            url = "ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.fna.gz"
-            gz_path = self.fasta_path + ".gz"
-            try:
-                urllib.request.urlretrieve(url, gz_path)
-                with gzip.open(gz_path, 'rb') as f_in, open(self.fasta_path, 'wb') as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-                os.remove(gz_path)
-                logger.info(f"FASTA файл успешно загружен по пути {self.fasta_path}")
-            except Exception as e:
-                logger.warning(f"Не удалось загрузить FASTA файл: {e}. Используется таблица кодонов по умолчанию.")
+        if os.path.exists(self.fasta_path):
+            logger.info(f"FASTA файл для {self.organism} уже существует по пути {self.fasta_path}.")
+            return
+        logger.info(f"Загрузка FASTA файла для {self.organism} (TaxID: {self.organism_id})...")
+        try:
+            Entrez.email = self.entrez_email
+            search_handle = Entrez.esearch(db="nucleotide", term=f"txid{self.organism_id}[Organism] AND chromosome[Title]", retmax=1)
+            search_results = Entrez.read(search_handle)
+            search_handle.close()
+            if not search_results["IdList"]:
+                logger.warning(f"Не удалось найти геном для {self.organism} (TaxID: {self.organism_id}).")
+                if self.organism_id == FALLBACK_ORGANISM_ID:
+                    url = "ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.fna.gz"
+                    self._download_fallback_fasta(url)
+                return
+            genome_id = search_results["IdList"][0]
+            fetch_handle = Entrez.efetch(db="nucleotide", id=genome_id, rettype="fasta", retmode="text")
+            raw_data = fetch_handle.read()
+            fetch_handle.close()
+
+            # Предобработка: удаляем комментарии перед первой последовательностью
+            lines = raw_data.splitlines()
+            cleaned_lines = []
+            in_sequence = False
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith(">"):
+                    in_sequence = True
+                if in_sequence:
+                    cleaned_lines.append(line)
+                elif not (line.startswith("#") or line.startswith(";") or line.startswith("!")):
+                    logger.warning(f"Неожиданная строка в начале FASTA файла: {line}")
+            cleaned_data = "\n".join(cleaned_lines)
+
+            with open(self.fasta_path, "w") as f:
+                f.write(cleaned_data)
+            logger.info(f"FASTA файл успешно загружен по пути {self.fasta_path}")
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки FASTA файла через Entrez: {e}")
+            if self.organism_id == FALLBACK_ORGANISM_ID:
+                url = "ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/005/845/GCF_000005845.2_ASM584v2/GCF_000005845.2_ASM584v2_genomic.fna.gz"
+                self._download_fallback_fasta(url)
+
+    def _download_fallback_fasta(self, url: str):
+        logger.info(f"Загрузка резервного FASTA файла для {self.organism}...")
+        gz_path = self.fasta_path + ".gz"
+        try:
+            urllib.request.urlretrieve(url, gz_path)
+            with gzip.open(gz_path, 'rb') as f_in, open(self.fasta_path, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            os.remove(gz_path)
+            logger.info(f"Резервный FASTA файл успешно загружен по пути {self.fasta_path}")
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить резервный FASTA файл: {e}")
+
+    def _process_sequence(self, seq: str) -> Tuple[Dict[str, int], int]:
+        """Обработка одной последовательности для подсчёта кодонов (для параллельного выполнения)."""
+        codon_counts = {}
+        total_codons = 0
+        if len(seq) % 3 != 0:
+            return codon_counts, total_codons
+        for i in range(0, len(seq) - 3, 3):
+            codon = seq[i:i+3].upper()
+            if 'N' not in codon:
+                codon_counts[codon] = codon_counts.get(codon, 0) + 1
+                total_codons += 1
+        return codon_counts, total_codons
+
+    def _merge_codon_counts(self, results: List[Tuple[Dict[str, int], int]]) -> Tuple[Dict[str, int], int]:
+        """Объединение результатов подсчёта кодонов из параллельных процессов."""
+        merged_codon_counts = {}
+        total_codons = 0
+        for codon_counts, count in results:
+            for codon, freq in codon_counts.items():
+                merged_codon_counts[codon] = merged_codon_counts.get(codon, 0) + freq
+            total_codons += count
+        return merged_codon_counts, total_codons
+
+    def _load_codon_usage_from_file(self) -> Optional[Dict[str, float]]:
+        """Попытка загрузить таблицу кодонов из локального файла."""
+        local_file = os.path.join(self.data_dir, f"{self.organism.replace(' ', '_')}_codon_usage.txt")
+        if not os.path.exists(local_file):
+            return None
+        try:
+            codon_usage = {}
+            with open(local_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        codon, freq = parts[0], float(parts[1])
+                        codon_usage[codon.upper()] = freq
+            total = sum(codon_usage.values())
+            if total > 0:
+                return {codon: freq / total for codon, freq in codon_usage.items()}
+            return None
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки локальной таблицы кодонов из {local_file}: {e}")
+            return None
 
     def load_codon_usage(self, force_recalculate: bool = False) -> Dict[str, float]:
-        if not self.entrez_email:
-            return DEFAULT_CODON_USAGE
+        codon_usage_path = os.path.join(self.data_dir, f"{self.organism.replace(' ', '_')}_codon_usage.json")
+        if os.path.exists(codon_usage_path) and not force_recalculate:
+            logger.info(f"Загрузка сохранённой таблицы кодонов для {self.organism} из {codon_usage_path}")
+            with open(codon_usage_path, 'r') as f:
+                return json.load(f)
+
+        # Попытка загрузить из локального файла
+        local_codon_usage = self._load_codon_usage_from_file()
+        if local_codon_usage:
+            logger.info(f"Используется локальная таблица кодонов для {self.organism}")
+            with open(codon_usage_path, 'w') as f:
+                json.dump(local_codon_usage, f, indent=2)
+            return local_codon_usage
+
+        logger.info(f"Расчёт таблицы использования кодонов для {self.organism} (TaxID: {self.organism_id})...")
         try:
-            from Bio import Entrez
             Entrez.email = self.entrez_email
-            # Здесь должен быть код для загрузки данных через Entrez, но для упрощения используем загруженный FASTA
-            logger.info("Загрузка данных через Entrez отключена в этом примере. Используется таблица по умолчанию.")
-            return DEFAULT_CODON_USAGE
+            # Поиск генов для организма (уменьшили retmax для ускорения)
+            search_handle = Entrez.esearch(db="nucleotide", term=f"txid{self.organism_id}[Organism] AND gene[Feature]", retmax=100)
+            search_results = Entrez.read(search_handle)
+            search_handle.close()
+            if not search_results["IdList"]:
+                logger.warning(f"Не удалось найти гены для {self.organism}. Используется таблица по умолчанию.")
+                return DEFAULT_CODON_USAGE
+
+            # Пакетная загрузка генов (по 50 ID за раз)
+            gene_ids = search_results["IdList"]
+            batch_size = 50
+            sequences = []
+            for i in range(0, len(gene_ids), batch_size):
+                batch_ids = gene_ids[i:i + batch_size]
+                try:
+                    fetch_handle = Entrez.efetch(
+                        db="nucleotide",
+                        id=",".join(batch_ids),  # Пакетная загрузка
+                        rettype="fasta_cds_na",
+                        retmode="text"
+                    )
+                    for record in SeqIO.parse(fetch_handle, "fasta"):
+                        seq = str(record.seq)
+                        if len(seq) < 30 or len(seq) % 3 != 0:  # Пропускаем короткие или некорректные последовательности
+                            continue
+                        sequences.append(seq)
+                    fetch_handle.close()
+                except Exception as e:
+                    logger.warning(f"Ошибка загрузки пакета генов {batch_ids}: {e}")
+
+            if not sequences:
+                logger.warning(f"Не удалось собрать данные о кодонах для {self.organism}. Используется таблица по умолчанию.")
+                return DEFAULT_CODON_USAGE
+
+            # Параллельная обработка последовательностей
+            num_processes = min(cpu_count(), 4)  # Ограничиваем количество процессов
+            with Pool(processes=num_processes) as pool:
+                results = pool.map(self._process_sequence, sequences)
+
+            # Объединение результатов
+            codon_counts, total_codons = self._merge_codon_counts(results)
+
+            if total_codons < 1000:  # Минимальный порог для надёжной статистики
+                logger.warning(f"Собрано слишком мало кодонов ({total_codons}) для {self.organism}. Используется таблица по умолчанию.")
+                return DEFAULT_CODON_USAGE
+
+            # Нормализация частот
+            codon_usage = {codon: count / total_codons for codon, count in codon_counts.items()}
+            with open(codon_usage_path, 'w') as f:
+                json.dump(codon_usage, f, indent=2)
+            logger.info(f"Таблица использования кодонов сохранена по пути {codon_usage_path}")
+            return codon_usage
         except Exception as e:
             logger.warning(f"Ошибка загрузки данных через Entrez: {e}. Используется таблица по умолчанию.")
             return DEFAULT_CODON_USAGE
 
     def calculate_codon_pair_scores(self) -> Optional[Dict[str, float]]:
         if not os.path.exists(self.fasta_path):
-            logger.info("FASTA файл недоступен. Расчет CPB пропущен.")
+            logger.info("FASTA файл недоступен. Расчёт CPB пропущен.")
             return None
         try:
             cps_table = {}
             total_pairs = 0
-            for record in SeqIO.parse(self.fasta_path, "fasta"):
+            for record in SeqIO.parse(self.fasta_path, "fasta-blast"):
                 seq = str(record.seq)
                 for i in range(0, len(seq) - 6, 3):
                     pair = seq[i:i+6].upper()
@@ -170,9 +335,12 @@ class ResourceManager:
                 return None
             for pair in cps_table:
                 cps_table[pair] = cps_table[pair] / total_pairs
+            with open(self.cps_path, 'w') as f:
+                json.dump(cps_table, f, indent=2)
+            logger.info(f"Таблица CPB сохранена по пути {self.cps_path}")
             return cps_table
         except Exception as e:
-            logger.warning(f"Ошибка расчета CPB: {e}. CPB отключен.")
+            logger.warning(f"Ошибка расчёта CPB: {e}. CPB отключен.")
             return None
 
 # --- Классы спецификаций ---
@@ -421,7 +589,7 @@ class CodonOptimizer:
         self.fitness_cache = OrderedDict()
         self.spec_cache = OrderedDict()
         self.codon_scores_cache = OrderedDict()
-        self.cache_limit = 50000  # Увеличенный размер кэша
+        self.cache_limit = 50000
         if not self.aa_sequence:
             raise ValueError("Пустая аминокислотная последовательность")
         self._validate_weights()
@@ -490,7 +658,6 @@ class CodonOptimizer:
         )
         self.fitness_cache[dna_sequence] = total_score
 
-        # Управление размером кэша
         if len(self.fitness_cache) > self.cache_limit:
             self.fitness_cache.popitem(last=False)
         if len(self.spec_cache) > self.cache_limit:
@@ -555,7 +722,6 @@ class CodonOptimizer:
                     child1, child2 = parent1, parent2
                 child1 = self._mutate(child1, mutation_rate)
                 child2 = self._mutate(child2, mutation_rate)
-                # Пропускаем локальный поиск для коротких последовательностей
                 effective_ls_steps = 0 if len(self.aa_sequence) < 10 else local_search_steps
                 if effective_ls_steps > 0:
                     child1 = self._local_search(child1, effective_ls_steps)
@@ -579,7 +745,6 @@ class CodonOptimizer:
     def _select_parents(self, population: List[str], fitness_scores: List[float], tournament_size: int) -> Tuple[str, str]:
         def select_one():
             competitors = random.sample(range(len(population)), min(tournament_size, len(population)))
-            # Учитываем разнообразие для избежания локальных минимумов
             diversity_scores = []
             for i in competitors:
                 diversity = sum(1 for j in range(len(population)) if population[i] != population[j])
@@ -691,9 +856,11 @@ class OutputManager:
 
 # --- Основное приложение ---
 class CodonOptimizationApp:
-    def __init__(self):
+    def __init__(self, organism: str = FALLBACK_ORGANISM, organism_id: str = FALLBACK_ORGANISM_ID, 
+                 codon_table_id: Optional[int] = None):
         self.config = ConfigurationManager().load_config()
-        self.resources = ResourceManager()
+        self.codon_table_id = codon_table_id if codon_table_id is not None else self.config["default_codon_table"]
+        self.resources = ResourceManager(organism=organism, organism_id=organism_id, codon_table_id=self.codon_table_id)
         self.output = OutputManager()
         self.test_sequences = {
             "ShortPeptide": "MAGWSR",
@@ -705,7 +872,7 @@ class CodonOptimizationApp:
 
     def setup_specifications(self, codon_usage: Dict[str, float], cps_table: Optional[Dict[str, float]]) -> List[Specification]:
         specs = [
-            CodonUsageSpecification(codon_usage),
+            CodonUsageSpecification(codon_usage, self.codon_table_id),
             GcContentSpecification(self.config["target_gc_range"]),
             AvoidPatternSpecification(self.config["avoid_motifs"]),
             RbsSpecification(),
@@ -725,6 +892,8 @@ class CodonOptimizationApp:
 
     def run(self, show_plots: bool = False):
         logger.info("--- Скрипт оптимизации кодонов ---")
+        logger.info(f"Оптимизация выполняется для организма: {self.resources.organism} (TaxID: {self.resources.organism_id})")
+        logger.info(f"Используется таблица кодонов: {self.codon_table_id}")
         try:
             self.log_resources()
             codon_usage = self.resources.load_codon_usage()
@@ -740,6 +909,7 @@ class CodonOptimizationApp:
                         codon_usage=codon_usage,
                         specifications=specifications,
                         weights=self.config["spec_weights"],
+                        codon_table_id=self.codon_table_id,
                         num_processes=2
                     )
                     dna, metrics = optimizer.optimize_ma(**self.config["ma_parameters"])
@@ -757,5 +927,6 @@ class CodonOptimizationApp:
             raise
 
 if __name__ == "__main__":
-    app = CodonOptimizationApp()
+    # Пример запуска для Bacillus subtilis (TaxID: 1423)
+    app = CodonOptimizationApp(organism="Bacillus subtilis", organism_id="1423", codon_table_id=11)
     app.run(show_plots=False)

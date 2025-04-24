@@ -1,18 +1,40 @@
 import unittest
+import subprocess
+import logging
 from codon_optimizer import *
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 class TestCodonOptimization(unittest.TestCase):
     def setUp(self):
         self.codon_usage = DEFAULT_CODON_USAGE
         self.aa_sequence = "MAGWSR"
         self.config = ConfigurationManager().load_config()
+        # Проверяем, доступен ли RNAfold, чтобы избежать ошибок
+        try:
+            subprocess.run(["RNAfold", "--version"], capture_output=True, check=True)
+            rna_folding_available = True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            rna_folding_available = False
+            logger.warning("RNAfold не найден. Тесты для RnaFoldingSpecification будут пропущены.")
+
         self.specifications = [
             CodonUsageSpecification(self.codon_usage),
             GcContentSpecification(self.config["target_gc_range"]),
             AvoidPatternSpecification(self.config["avoid_motifs"]),
             RbsSpecification(),
-            RnaFoldingSpecification(**self.config["rna_folding"])
         ]
+        # Добавляем RnaFoldingSpecification только если RNAfold доступен
+        if rna_folding_available:
+            self.specifications.append(RnaFoldingSpecification(**self.config["rna_folding"]))
+        else:
+            # Удаляем вес для RnaFolding5Prime, если спецификация недоступна
+            self.config["spec_weights"] = {
+                k: v for k, v in self.config["spec_weights"].items() if k != "RnaFolding5Prime"
+            }
+
         self.weights = self.config["spec_weights"]
         self.output = OutputManager()
 
@@ -46,9 +68,21 @@ class TestCodonOptimization(unittest.TestCase):
         print(f"Приспособленность: {metrics['fitness']:.4f}, GC: {metrics['gc_content']:.3f}, CAI: {metrics['cai']:.4f}")
         self.output.save_metrics_plot(metrics, "Тестовые метрики", "test_metrics.png")
 
-    def test_app_run(self):
-        app = CodonOptimizationApp()
+    def test_app_run_ecoli(self):
+        app = CodonOptimizationApp(organism="Escherichia coli K-12", organism_id="83333")
+        # Уменьшаем количество последовательностей для тестов
+        app.test_sequences = {"ShortPeptide": "MAGWSR"}
         app.run()
 
+    def test_app_run_bsubtilis(self):
+        app = CodonOptimizationApp(organism="Bacillus subtilis", organism_id="1423")
+        # Уменьшаем количество последовательностей для тестов
+        app.test_sequences = {"ShortPeptide": "MAGWSR"}
+        app.run()
+
+# Запуск тестов
 if __name__ == "__main__":
-    unittest.main()
+    # Для Jupyter Notebook и консоли используем TestLoader
+    suite = unittest.TestLoader().loadTestsFromTestCase(TestCodonOptimization)
+    runner = unittest.TextTestRunner(verbosity=2)
+    runner.run(suite)

@@ -1,0 +1,33 @@
+{
+  "spec_weights": {
+    "CodonUsage": 1.2,
+    "GcContent": 1.0,
+    "AvoidPattern": 1.5,
+    "RnaFolding5Prime": 0.8,
+    "CodonPairBias": 1.0,
+    "RbsSpecification": 0.5
+  },
+  "ma_parameters": {
+    "population_size": 10,
+    "num_generations": 5,
+    "crossover_rate": 0.85,
+    "mutation_rate": 0.06,
+    "tournament_size": 4,
+    "elitism_count": 2,
+    "local_search_steps": 3
+  },
+  "rna_folding": {
+    "window_size": 40,
+    "bad_mfe": -12.0,
+    "ideal_mfe": -4.0
+  },
+  "cpb_parameters": {
+    "sigmoid_k": 3.0,
+    "sigmoid_center": 0.0
+  },
+  "target_gc_range": [0.45, 0.55],
+  "avoid_motifs": [
+    "AATAAA", "GATC", "TATAAT", "GGGGGG", "CCCCCC", "AAAAAA", "TTTTTT"
+  ],
+  "default_codon_table": 11
+}
