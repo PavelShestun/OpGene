@@ -1,6 +1,11 @@
 import unittest
 import subprocess
 import logging
+import sys
+import os
+
+# Add src to path to import codon_optimizer
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 from codon_optimizer import *
 
 # Настройка логирования
@@ -54,14 +59,13 @@ class TestCodonOptimization(unittest.TestCase):
         print(f"GC Content оценка: {eval_result.score:.4f}")
 
     def test_optimizer(self):
-        optimizer = CodonOptimizer(
+        with CodonOptimizer(
             aa_sequence=self.aa_sequence,
             codon_usage=self.codon_usage,
             specifications=self.specifications,
-            weights=self.weights,
-            num_processes=2
-        )
-        dna, metrics = optimizer.optimize_ma(**self.config["ma_parameters"])
+            weights=self.weights
+        ) as optimizer:
+            dna, metrics = optimizer.optimize_ma(**self.config["ma_parameters"])
         self.assertEqual(len(dna), len(self.aa_sequence) * 3)
         self.assertGreater(metrics["fitness"], 0.0)
         print(f"Оптимизированная ДНК: {dna}")

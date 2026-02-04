@@ -18,7 +18,9 @@ from Bio.Data import CodonTable
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from multiprocessing import Pool, cpu_count
+from concurrent.futures import ProcessPoolExecutor
 from collections import OrderedDict
+import functools
 import psutil
 
 # --- Настройка логирования ---
@@ -324,7 +326,13 @@ class ResourceManager:
         try:
             cps_table = {}
             total_pairs = 0
-            for record in SeqIO.parse(self.fasta_path, "fasta-blast"):
+            # Try fasta-blast first, fallback to fasta
+            try:
+                records = list(SeqIO.parse(self.fasta_path, "fasta-blast"))
+            except:
+                records = list(SeqIO.parse(self.fasta_path, "fasta"))
+
+            for record in records:
                 seq = str(record.seq)
                 for i in range(0, len(seq) - 6, 3):
                     pair = seq[i:i+6].upper()
@@ -383,9 +391,10 @@ class Specification:
         return self.__class__.__name__.replace("Specification", "")
 
 class CodonUsageSpecification(Specification):
-    def __init__(self, codon_usage: Dict[str, float], codon_table_id: int = 11):
+    def __init__(self, codon_usage: Dict[str, float], codon_table_id: int = 11, mode: str = "optimization"):
         self.codon_usage = codon_usage or DEFAULT_CODON_USAGE
         self.codon_table_id = codon_table_id
+        self.mode = mode # "optimization" or "harmonization"
         self.codon_weights = self._compute_codon_weights()
 
     def _compute_codon_weights(self) -> Dict[str, float]:
@@ -408,11 +417,54 @@ class CodonUsageSpecification(Specification):
 
     def evaluate(self, sequence: str) -> SpecEvaluation:
         if not sequence:
-            return SpecEvaluation(0.0, "CAI: N/A (пустая последовательность)")
+            return SpecEvaluation(0.0, f"{self.get_name()}: N/A (пустая последовательность)")
         if len(sequence) % 3 != 0:
-            return SpecEvaluation(0.0, "CAI: Длина последовательности не кратна 3")
-        score = self._calculate_cai(sequence)
-        return SpecEvaluation(score, f"CAI: {score:.4f}")
+            return SpecEvaluation(0.0, f"{self.get_name()}: Длина последовательности не кратна 3")
+
+        if self.mode == "harmonization":
+            score = self._calculate_harmonization(sequence)
+            return SpecEvaluation(score, f"Harmonization: {score:.4f}")
+        else:
+            score = self._calculate_cai(sequence)
+            return SpecEvaluation(score, f"CAI: {score:.4f}")
+
+    def _calculate_harmonization(self, dna_seq: str) -> float:
+        """Calculates how well the sequence matches the host codon usage distribution."""
+        table = CodonTable.unambiguous_dna_by_id.get(self.codon_table_id, CodonTable.standard_dna_table)
+
+        # Count codons in sequence
+        counts = {}
+        total_by_aa = {}
+        for i in range(0, len(dna_seq), 3):
+            codon = dna_seq[i:i+3].upper()
+            if codon in table.stop_codons or codon not in self.codon_weights:
+                continue
+            aa = table.forward_table.get(codon)
+            if not aa: continue
+            counts[codon] = counts.get(codon, 0) + 1
+            total_by_aa[aa] = total_by_aa.get(aa, 0) + 1
+
+        if not total_by_aa:
+            return 0.0
+
+        # Calculate MSE between sequence distribution and host distribution
+        errors = []
+        for codon, count in counts.items():
+            aa = table.forward_table[codon]
+            seq_freq = count / total_by_aa[aa]
+
+            # Host relative frequency
+            synonymous = [c for c, a in table.forward_table.items() if a == aa]
+            host_total = sum(self.codon_usage.get(c, 0) for c in synonymous)
+            host_freq = self.codon_usage.get(codon, 0) / host_total if host_total > 0 else 0
+
+            errors.append((seq_freq - host_freq) ** 2)
+
+        if not errors:
+            return 1.0
+
+        avg_mse = sum(errors) / len(errors)
+        return max(0.0, 1.0 - avg_mse * 5) # Scale to 0-1
 
     def _calculate_cai(self, dna_seq: str) -> float:
         table = CodonTable.unambiguous_dna_by_id.get(self.codon_table_id, CodonTable.standard_dna_table)
@@ -481,6 +533,8 @@ class AvoidPatternSpecification(Specification):
         return SpecEvaluation(score, msg, unique_locations)
 
 class RnaFoldingSpecification(Specification):
+    _mfe_cache = {}
+
     def __init__(self, window_size: int, ideal_mfe: float, bad_mfe: float):
         self.window_size = window_size
         self.ideal_mfe = ideal_mfe
@@ -502,24 +556,34 @@ class RnaFoldingSpecification(Specification):
             return SpecEvaluation(0.0, "MFE: N/A (пустая последовательность)")
         if len(sequence) < self.window_size:
             return SpecEvaluation(0.0, f"MFE: Последовательность короче окна ({len(sequence)} < {self.window_size})")
-        prefix = sequence[:self.window_size]
-        try:
-            process = subprocess.run(
-                ["RNAfold", "--noPS"], input=prefix, text=True, capture_output=True, check=True
-            )
-            output = process.stdout.strip().split('\n')
-            mfe_line = output[1] if len(output) > 1 else ''
-            mfe = float(mfe_line[mfe_line.rfind('(')+1:mfe_line.rfind(')')].strip())
-            if mfe <= self.bad_mfe:
-                score = 0.0
-            elif mfe >= self.ideal_mfe:
-                score = 1.0
-            else:
-                score = (mfe - self.bad_mfe) / (self.ideal_mfe - self.bad_mfe)
-            return SpecEvaluation(score, f"MFE: {mfe:.2f} (цель: {self.ideal_mfe}, порог: {self.bad_mfe})")
-        except Exception as e:
-            logger.warning(f"Ошибка выполнения RNAfold: {e}")
-            return SpecEvaluation(0.0, f"MFE: Ошибка ({str(e)})")
+
+        prefix = sequence[:self.window_size].upper()
+        if prefix in self._mfe_cache:
+            mfe = self._mfe_cache[prefix]
+        else:
+            try:
+                process = subprocess.run(
+                    ["RNAfold", "--noPS"], input=prefix, text=True, capture_output=True, check=True
+                )
+                output = process.stdout.strip().split('\n')
+                mfe_line = output[1] if len(output) > 1 else ''
+                mfe_match = re.search(r'\(\s*([-+]?\d*\.?\d+)\)', mfe_line)
+                if mfe_match:
+                    mfe = float(mfe_match.group(1))
+                    self._mfe_cache[prefix] = mfe
+                else:
+                    raise ValueError(f"Не удалось распарсить MFE из вывода: {mfe_line}")
+            except Exception as e:
+                logger.warning(f"Ошибка выполнения RNAfold: {e}")
+                return SpecEvaluation(0.0, f"MFE: Ошибка ({str(e)})")
+
+        if mfe <= self.bad_mfe:
+            score = 0.0
+        elif mfe >= self.ideal_mfe:
+            score = 1.0
+        else:
+            score = (mfe - self.bad_mfe) / (self.ideal_mfe - self.bad_mfe)
+        return SpecEvaluation(score, f"MFE: {mfe:.2f} (цель: {self.ideal_mfe}, порог: {self.bad_mfe})")
 
 class CodonPairBiasSpecification(Specification):
     def __init__(self, cps_table: Dict[str, float], sigmoid_k: float = 3.0, sigmoid_center: float = 0.0):
@@ -575,27 +639,53 @@ class RbsSpecification(Specification):
                 best_message = message
         return SpecEvaluation(best_score, best_message)
 
+def _evaluate_individual(dna_sequence: str, aa_sequence: str, specifications: List[Specification], weights: Dict[str, float]) -> Tuple[str, float, Dict[str, float]]:
+    """Standalone function for parallel evaluation of an individual."""
+    if not dna_sequence or len(dna_sequence) != len(aa_sequence) * 3:
+        return dna_sequence, -float('inf'), {}
+
+    spec_scores = {}
+    for spec in specifications:
+        try:
+            eval_result = spec.evaluate(dna_sequence)
+            spec_scores[spec.get_name()] = eval_result.score
+        except Exception as e:
+            logger.warning(f"Ошибка оценки {spec.get_name()}: {e}")
+            spec_scores[spec.get_name()] = 0.0
+
+    total_score = sum(weights.get(name, 0.0) * score for name, score in spec_scores.items())
+    return dna_sequence, total_score, spec_scores
+
 # --- Оптимизатор кодонов ---
 class CodonOptimizer:
     def __init__(self, aa_sequence: str, codon_usage: Dict[str, float], specifications: List[Specification],
-                 weights: Dict[str, float], codon_table_id: int = 11, num_processes: int = 2):
+                 weights: Dict[str, float], codon_table_id: int = 11, num_processes: Optional[int] = None):
         self.aa_sequence = aa_sequence.upper().replace('*', '')
         self.codon_usage = codon_usage
         self.specifications = specifications
         self.weights = weights
         self.codon_table_id = codon_table_id
-        self.num_processes = num_processes
+        self.num_processes = num_processes or min(cpu_count(), 8)
         self.back_table = self._get_backtranslation_table()
         self.fitness_cache = OrderedDict()
         self.spec_cache = OrderedDict()
-        self.codon_scores_cache = OrderedDict()
         self.cache_limit = 50000
+        self._executor = None
         if not self.aa_sequence:
             raise ValueError("Пустая аминокислотная последовательность")
         self._validate_weights()
         for i, aa in enumerate(self.aa_sequence):
             if aa not in self.back_table:
                 raise ValueError(f"Недопустимая аминокислота '{aa}' на позиции {i}")
+
+    def __enter__(self):
+        self._executor = ProcessPoolExecutor(max_workers=self.num_processes)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._executor:
+            self._executor.shutdown()
+            self._executor = None
 
     def _get_backtranslation_table(self) -> Dict[str, List[str]]:
         table = CodonTable.unambiguous_dna_by_id.get(self.codon_table_id, CodonTable.standard_dna_table)
@@ -622,48 +712,62 @@ class CodonOptimizer:
         if total_weight <= 0:
             logger.warning("Все веса нулевые или отрицательные. Оптимизация может быть неэффективной.")
 
-    def _evaluate_spec(self, spec_and_sequence: Tuple[Specification, str]) -> Tuple[str, float]:
-        spec, sequence = spec_and_sequence
-        try:
-            eval_result = spec.evaluate(sequence)
-            return spec.get_name(), eval_result.score
-        except Exception as e:
-            logger.warning(f"Ошибка оценки {spec.get_name()} на последовательности: {e}")
-            return spec.get_name(), 0.0
-
     def _calculate_fitness(self, dna_sequence: str) -> float:
+        """Sequential fitness calculation for a single sequence (with caching)."""
         if dna_sequence in self.fitness_cache:
             return self.fitness_cache[dna_sequence]
-        if len(dna_sequence) != len(self.aa_sequence) * 3:
-            return -float('inf')
 
-        try:
-            with Pool(processes=self.num_processes) as pool:
-                results = pool.map(
-                    self._evaluate_spec,
-                    [(spec, dna_sequence) for spec in self.specifications]
-                )
-        except Exception as e:
-            logger.warning(f"Ошибка параллельной оценки: {e}. Переход к последовательной оценке.")
-            results = [
-                self._evaluate_spec((spec, dna_sequence))
-                for spec in self.specifications
-            ]
-
-        spec_scores = dict(results)
-        self.spec_cache[dna_sequence] = spec_scores
-        total_score = sum(
-            self.weights.get(spec_name, 0.0) * score
-            for spec_name, score in spec_scores.items()
+        _, total_score, spec_scores = _evaluate_individual(
+            dna_sequence, self.aa_sequence, self.specifications, self.weights
         )
+
         self.fitness_cache[dna_sequence] = total_score
+        self.spec_cache[dna_sequence] = spec_scores
 
         if len(self.fitness_cache) > self.cache_limit:
             self.fitness_cache.popitem(last=False)
-        if len(self.spec_cache) > self.cache_limit:
             self.spec_cache.popitem(last=False)
-
         return total_score
+
+    def _calculate_population_fitness(self, population: List[str]) -> List[float]:
+        """Parallel fitness calculation for a whole population."""
+        # Check cache first
+        needed_indices = []
+        fitness_scores = [0.0] * len(population)
+
+        for i, ind in enumerate(population):
+            if ind in self.fitness_cache:
+                fitness_scores[i] = self.fitness_cache[ind]
+            else:
+                needed_indices.append(i)
+
+        if not needed_indices:
+            return fitness_scores
+
+        needed_sequences = [population[i] for i in needed_indices]
+
+        if self._executor:
+            # Parallel evaluation
+            eval_func = functools.partial(
+                _evaluate_individual,
+                aa_sequence=self.aa_sequence,
+                specifications=self.specifications,
+                weights=self.weights
+            )
+            results = list(self._executor.map(eval_func, needed_sequences))
+        else:
+            # Fallback to sequential
+            results = [
+                _evaluate_individual(seq, self.aa_sequence, self.specifications, self.weights)
+                for seq in needed_sequences
+            ]
+
+        for idx, (seq, score, specs) in zip(needed_indices, results):
+            fitness_scores[idx] = score
+            self.fitness_cache[seq] = score
+            self.spec_cache[seq] = specs
+
+        return fitness_scores
 
     def _evaluate_final_sequence(self, dna_sequence: str) -> Dict:
         evaluations = {spec.get_name(): spec.evaluate(dna_sequence).as_dict() for spec in self.specifications}
@@ -706,35 +810,50 @@ class CodonOptimizer:
         logger.info(f"Параметры: Pop={population_size}, Gens={num_generations}, XRate={crossover_rate:.2f}, "
                     f"MutRate={mutation_rate:.3f}, TournSize={tournament_size}, Elite={elitism_count}, LS_Steps={local_search_steps}")
         start_time = time.time()
+
         population = [self._random_individual() for _ in range(population_size - 1)]
         greedy_dna, _ = self.optimize_greedy()
         population.append(greedy_dna)
-        population_fitness = [self._calculate_fitness(ind) for ind in population]
+
+        population_fitness = self._calculate_population_fitness(population)
         best_dna, best_fitness = max(zip(population, population_fitness), key=lambda x: x[1])
         logger.info(f"Начальная лучшая приспособленность: {best_fitness:.4f}")
+
         for gen in range(num_generations):
-            next_population = population[:elitism_count]
+            next_population = []
+            # Elite stay
+            elite_indices = sorted(range(len(population_fitness)), key=lambda i: population_fitness[i], reverse=True)[:elitism_count]
+            next_population.extend([population[i] for i in elite_indices])
+
             while len(next_population) < population_size:
                 parent1, parent2 = self._select_parents(population, population_fitness, tournament_size)
                 if random.random() < crossover_rate:
                     child1, child2 = self._crossover(parent1, parent2)
                 else:
                     child1, child2 = parent1, parent2
+
                 child1 = self._mutate(child1, mutation_rate)
                 child2 = self._mutate(child2, mutation_rate)
+
                 effective_ls_steps = 0 if len(self.aa_sequence) < 10 else local_search_steps
                 if effective_ls_steps > 0:
                     child1 = self._local_search(child1, effective_ls_steps)
                     if len(next_population) < population_size - 1:
                         child2 = self._local_search(child2, effective_ls_steps)
+
                 next_population.extend([child1, child2][:population_size - len(next_population)])
+
             population = next_population
-            population_fitness = [self._calculate_fitness(ind) for ind in population]
-            current_best = max(zip(population, population_fitness), key=lambda x: x[1])
-            if current_best[1] > best_fitness:
-                best_dna, best_fitness = current_best
+            population_fitness = self._calculate_population_fitness(population)
+
+            current_best_idx = max(range(len(population_fitness)), key=lambda i: population_fitness[i])
+            if population_fitness[current_best_idx] > best_fitness:
+                best_dna = population[current_best_idx]
+                best_fitness = population_fitness[current_best_idx]
+
             if (gen + 1) % max(1, num_generations // 5) == 0:
                 logger.info(f"Поколение: {gen+1}/{num_generations}, Лучшая: {best_fitness:.4f}, Средняя: {statistics.mean(population_fitness):.4f}")
+
         metrics = self._evaluate_final_sequence(best_dna)
         logger.info(f"Меметический алгоритм завершен за {time.time() - start_time:.2f} секунд")
         return best_dna, metrics
@@ -742,18 +861,40 @@ class CodonOptimizer:
     def _random_individual(self) -> str:
         return "".join(random.choice(self.back_table.get(aa, ['NNN'])) for aa in self.aa_sequence)
 
+    def _calculate_diversity(self, ind: str, population: List[str]) -> float:
+        """Calculates average Hamming distance (at codon level) from individual to population."""
+        if not population: return 0.0
+        total_dist = 0
+        num_codons = len(ind) // 3
+        if num_codons == 0: return 0.0
+
+        # Sample population if it's too large for performance
+        sample_size = min(len(population), 20)
+        sample = random.sample(population, sample_size)
+
+        for other in sample:
+            if len(ind) != len(other): continue
+            dist = sum(1 for i in range(0, len(ind), 3) if ind[i:i+3] != other[i:i+3])
+            total_dist += dist / num_codons
+        return total_dist / len(sample)
+
     def _select_parents(self, population: List[str], fitness_scores: List[float], tournament_size: int) -> Tuple[str, str]:
+        """Tournament selection with diversity awareness."""
         def select_one():
             competitors = random.sample(range(len(population)), min(tournament_size, len(population)))
             diversity_scores = []
             for i in competitors:
-                diversity = sum(1 for j in range(len(population)) if population[i] != population[j])
-                adjusted_fitness = fitness_scores[i] * (1 + 0.1 * diversity / len(population))
+                diversity = self._calculate_diversity(population[i], population)
+                # Boost fitness of diverse individuals
+                adjusted_fitness = fitness_scores[i] * (1 + 0.2 * diversity)
                 diversity_scores.append((i, adjusted_fitness))
             return population[max(diversity_scores, key=lambda x: x[1])[0]]
+
         parent1 = select_one()
         parent2 = select_one()
-        while parent2 == parent1 and len(population) > 1:
+        # Try to find a different parent for crossover
+        for _ in range(5):
+            if parent2 != parent1: break
             parent2 = select_one()
         return parent1, parent2
 
@@ -773,40 +914,62 @@ class CodonOptimizer:
         return "".join(codons)
 
     def _local_search(self, dna: str, max_steps: int) -> str:
+        """Improved local search targeting specific problem areas."""
         current_dna = dna
         current_fitness = self._calculate_fitness(dna)
+
+        # Get problem areas from specifications
+        spec_evals = self.spec_cache.get(dna, {})
+        problem_indices = set()
+
+        # Add indices where patterns are found
+        avoid_spec = next((s for s in self.specifications if isinstance(s, AvoidPatternSpecification)), None)
+        if avoid_spec:
+            eval_res = avoid_spec.evaluate(dna)
+            for start, end in eval_res.locations:
+                # Convert nucleotide indices to codon indices
+                for i in range(start // 3, (end + 2) // 3):
+                    if i < len(self.aa_sequence):
+                        problem_indices.add(i)
+
+        # Add 5' end if RNA folding is poor
+        rna_spec = next((s for s in self.specifications if isinstance(s, RnaFoldingSpecification)), None)
+        if rna_spec and spec_evals.get("RnaFolding", 1.0) < 0.8:
+            for i in range(min(len(self.aa_sequence), rna_spec.window_size // 3 + 1)):
+                problem_indices.add(i)
+
+        # Fallback to random mutable indices if no specific problems
         mutable_indices = [i for i, aa in enumerate(self.aa_sequence) if len(self.back_table.get(aa, [])) > 1]
-        problem_indices = []
-        for idx in mutable_indices:
-            score = 0.0
-            cai_spec = next((spec for spec in self.specifications if spec.get_name() == "CodonUsage"), None)
-            if cai_spec:
-                segment = current_dna[idx*3:idx*3+3]
-                score += cai_spec.evaluate(segment).score
-            problem_indices.append((idx, score))
-        problem_indices.sort(key=lambda x: x[1])
-        problem_indices = [idx for idx, _ in problem_indices]
-        for step in range(max_steps):
-            if not problem_indices:
+        if not problem_indices:
+            problem_indices = set(random.sample(mutable_indices, min(len(mutable_indices), max_steps * 2)))
+
+        # Limit problem indices to mutable ones
+        problem_indices = [idx for idx in problem_indices if idx in mutable_indices]
+        random.shuffle(problem_indices)
+
+        for step, idx in enumerate(problem_indices):
+            if step >= max_steps:
                 break
-            idx = problem_indices[step % len(problem_indices)]
+
             original_codon = current_dna[idx*3:idx*3+3]
             alternatives = [c for c in self.back_table.get(self.aa_sequence[idx], []) if c != original_codon]
-            if not alternatives:
-                continue
-            best_fitness = current_fitness
-            best_dna = current_dna
+
+            best_local_dna = current_dna
+            best_local_fitness = current_fitness
+
             dna_list = list(current_dna)
             for new_codon in alternatives:
                 dna_list[idx*3:idx*3+3] = list(new_codon)
                 temp_dna = "".join(dna_list)
                 fitness = self._calculate_fitness(temp_dna)
-                if fitness > best_fitness:
-                    best_fitness = fitness
-                    best_dna = temp_dna
-            if best_dna != current_dna:
-                current_dna = best_dna
-                current_fitness = best_fitness
+                if fitness > best_local_fitness:
+                    best_local_fitness = fitness
+                    best_local_dna = temp_dna
+
+            if best_local_dna != current_dna:
+                current_dna = best_local_dna
+                current_fitness = best_local_fitness
+
         return current_dna
 
 # --- Менеджер вывода ---
@@ -870,9 +1033,9 @@ class CodonOptimizationApp:
             "GFP": "MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTFSYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITLGMDELYK"
         }
 
-    def setup_specifications(self, codon_usage: Dict[str, float], cps_table: Optional[Dict[str, float]]) -> List[Specification]:
+    def setup_specifications(self, codon_usage: Dict[str, float], cps_table: Optional[Dict[str, float]], mode: str = "optimization") -> List[Specification]:
         specs = [
-            CodonUsageSpecification(codon_usage, self.codon_table_id),
+            CodonUsageSpecification(codon_usage, self.codon_table_id, mode=mode),
             GcContentSpecification(self.config["target_gc_range"]),
             AvoidPatternSpecification(self.config["avoid_motifs"]),
             RbsSpecification(),
@@ -890,33 +1053,32 @@ class CodonOptimizationApp:
         memory = psutil.virtual_memory()
         logger.info(f"Использование ресурсов: CPU: {cpu_percent}%, Память: {memory.percent}%")
 
-    def run(self, show_plots: bool = False):
-        logger.info("--- Скрипт оптимизации кодонов ---")
+    def run(self, show_plots: bool = False, mode: str = "optimization"):
+        logger.info(f"--- Скрипт оптимизации кодонов ({mode}) ---")
         logger.info(f"Оптимизация выполняется для организма: {self.resources.organism} (TaxID: {self.resources.organism_id})")
         logger.info(f"Используется таблица кодонов: {self.codon_table_id}")
         try:
             self.log_resources()
             codon_usage = self.resources.load_codon_usage()
             cps_table = self.resources.calculate_codon_pair_scores()
-            specifications = self.setup_specifications(codon_usage, cps_table)
+            specifications = self.setup_specifications(codon_usage, cps_table, mode=mode)
             results = {}
             for i, (name, aa_seq) in enumerate(self.test_sequences.items(), 1):
                 logger.info(f"--- Обработка последовательности {i}/{len(self.test_sequences)}: '{name}' ---")
                 logger.info(f"Аминокислотная последовательность ({len(aa_seq)} aa): {aa_seq[:60]}{'...' if len(aa_seq) > 60 else ''}")
                 try:
-                    optimizer = CodonOptimizer(
+                    with CodonOptimizer(
                         aa_sequence=aa_seq,
                         codon_usage=codon_usage,
                         specifications=specifications,
                         weights=self.config["spec_weights"],
-                        codon_table_id=self.codon_table_id,
-                        num_processes=2
-                    )
-                    dna, metrics = optimizer.optimize_ma(**self.config["ma_parameters"])
-                    logger.info(f"Метрики: Приспособленность={metrics['fitness']:.4f}, GC={metrics['gc_content']:.3f}, CAI={metrics['cai']:.4f}")
-                    self.output.save_fasta(dna, f"Оптимизированная CDS для {name}", f"optimized_{name}.fasta")
-                    self.output.save_metrics_plot(metrics, f"Метрики ({name})", f"metrics_{name}.png", show=show_plots)
-                    results[name] = metrics
+                        codon_table_id=self.codon_table_id
+                    ) as optimizer:
+                        dna, metrics = optimizer.optimize_ma(**self.config["ma_parameters"])
+                        logger.info(f"Метрики: Приспособленность={metrics['fitness']:.4f}, GC={metrics['gc_content']:.3f}, CAI={metrics['cai']:.4f}")
+                        self.output.save_fasta(dna, f"Оптимизированная CDS для {name}", f"optimized_{name}.fasta")
+                        self.output.save_metrics_plot(metrics, f"Метрики ({name})", f"metrics_{name}.png", show=show_plots)
+                        results[name] = metrics
                 except Exception as e:
                     logger.error(f"Ошибка оптимизации '{name}': {e}")
             self.output.save_results_summary(results)

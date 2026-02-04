@@ -1,5 +1,4 @@
-biopython==1.83 
-
-matplotlib==3.7.1 
-
+biopython==1.83
+matplotlib==3.7.1
 psutil==5.9.5
+numpy<2.0.0
