@@ -122,7 +122,7 @@ class ConfigurationManager:
 
 # --- Менеджер ресурсов ---
 class ResourceManager:
-    def __init__(self, organism: str = FALLBACK_ORGANISM, organism_id: str = FALLBACK_ORGANISM_ID, 
+    def __init__(self, organism: str = FALLBACK_ORGANISM, organism_id: str = FALLBACK_ORGANISM_ID,
                  data_dir: str = DATA_DIR, codon_table_id: int = 11):
         self.organism = organism
         self.organism_id = organism_id
@@ -137,7 +137,8 @@ class ResourceManager:
     def _get_entrez_email(self) -> str:
         email = os.getenv("ENTREZ_EMAIL", None)
         if not email:
-            raise ValueError("Email для Entrez не указан. Установите переменную окружения ENTREZ_EMAIL.")
+            logger.warning("Email для Entrez не указан. Запросы к NCBI могут быть ограничены.")
+            return "example@example.com"
         return email
 
     def _download_fasta_if_needed(self):
@@ -1019,7 +1020,7 @@ class OutputManager:
 
 # --- Основное приложение ---
 class CodonOptimizationApp:
-    def __init__(self, organism: str = FALLBACK_ORGANISM, organism_id: str = FALLBACK_ORGANISM_ID, 
+    def __init__(self, organism: str = FALLBACK_ORGANISM, organism_id: str = FALLBACK_ORGANISM_ID,
                  codon_table_id: Optional[int] = None):
         self.config = ConfigurationManager().load_config()
         self.codon_table_id = codon_table_id if codon_table_id is not None else self.config["default_codon_table"]
@@ -1089,6 +1090,12 @@ class CodonOptimizationApp:
             raise
 
 if __name__ == "__main__":
-    # Пример запуска для Bacillus subtilis (TaxID: 1423)
+    # Установите ваш email для Entrez
+    if "ENTREZ_EMAIL" not in os.environ:
+        os.environ["ENTREZ_EMAIL"] = "your_email@example.com"
+
+    # Можно выбрать режим: "optimization" (максимизация CAI) или "harmonization" (соответствие распределению)
+    mode = "optimization"
+
     app = CodonOptimizationApp(organism="Bacillus subtilis", organism_id="1423", codon_table_id=11)
-    app.run(show_plots=False)
+    app.run(show_plots=False, mode=mode)
