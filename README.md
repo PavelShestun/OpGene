@@ -1,145 +1,132 @@
+# 🧬 OpGene Elite: SOTA Codon Optimization Suite
 
-# Оптимизация кодонов
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B)
+![BioPython](https://img.shields.io/badge/Powered%20by-BioPython-orange)
 
-Этот проект реализует скрипт для оптимизации кодонов с использованием меметического алгоритма. Код адаптирован для работы как через консоль, так и через Jupyter Notebook, включая поддержку Google Colab. Проект включает установку зависимостей, запуск оптимизации и тестирование.
+**OpGene** is an industrial-grade, State-of-the-Art (SOTA) codon optimization and gene design suite. It utilizes a Memetic Genetic Algorithm to optimize amino acid sequences into DNA that is highly expressed in target organisms while ensuring the sequence is actually manufacturable by DNA synthesis vendors (like Twist Bioscience or IDT) and safe to use.
 
-## Описание проекта
+Whether you are expressing simple peptides in *E. coli* or complex human proteins in *CHO cells*, OpGene handles the biological complexity for you.
 
-Скрипт оптимизирует ДНК-последовательности для заданных аминокислотных последовательностей, используя следующие критерии:
-- **Codon Usage (CAI)**: Оптимизация использования кодонов для заданного организма (по умолчанию *E. coli* K-12 MG1655).
-- **GC Content**: Поддержание GC-содержания в заданном диапазоне.
-- **Avoid Pattern**: Исключение нежелательных мотивов.
-- **RBS Specification**: Оптимизация расположения Shine-Dalgarno последовательности.
-- **RNA Folding**: Оптимизация стабильности мРНК (требуется ViennaRNA).
-- **Codon Pair Bias (CPB)**: Оптимизация парного использования кодонов.
+---
 
-Оптимизация выполняется с помощью меметического алгоритма, который сочетает генетический алгоритм с локальным поиском.
+## ✨ Key Features
 
-## Улучшения в коде
+### 🔬 Biological Accuracy (Expression Optimization)
+* **Dual CAI Modes:** Choose between **"Maximize"** (greedy optimization for simple proteins) and **"Harmonize"** (matches the host's natural codon frequency to prevent misfolding of complex proteins).
+* **Ramp Hypothesis Integration:** Automatically uses slower, rarer codons for the first ~15 amino acids to prevent ribosome traffic jams during translation initiation.
+* **Codon Pair Bias (CPS):** Evaluates dinucleotide frequencies to maintain optimal ribosome speed.
+* **5' mRNA Stability:** Uses `ViennaRNA` to prevent tight RNA hairpins at the start codon that would block ribosome binding.
 
-### 1. Универсальность для разных бактерий
-- Добавлена поддержка выбора организма через параметры `organism` и `organism_id`.
-- Данные об использовании кодонов загружаются через Entrez API для указанного организма (по NCBI Taxonomy ID).
-- Поддержка различных таблиц кодонов (например, стандартный код, код для Mycoplasma).
-- **Добавлена поддержка локальных таблиц кодонов**: Можно предоставить файл с таблицей кодонов, чтобы избежать загрузки через Entrez.
+### 🏭 Manufacturability (Synthesis Readiness)
+* **Local GC Content Peaks:** Scans sliding windows to prevent localized GC-rich (>80%) or AT-rich (<20%) regions that stall polymerases.
+* **Direct Repeat Avoidance:** Strictly penalizes sequence repeats (≥12bp) to ensure successful physical DNA synthesis.
+* **Motif Avoidance:** Automatically removes homopolymers (e.g., `AAAAAA`), internal RBS sites (in bacteria), and high CpG islands (in mammals).
 
-### 2. Оптимизация скорости загрузки данных
-- Уменьшено количество загружаемых генов через Entrez (`retmax=100`).
-- Добавлена пакетная загрузка генов (по 50 за запрос).
-- Используется параллельная обработка для подсчёта кодонов.
+### 🛡️ Biosecurity Screening
+* Built-in screening for hazardous sequences (e.g., Antibiotic Resistance Markers, Toxins).
+* Supports uploading custom threat signatures via JSON.
 
-### 3. Результаты
-Результаты оптимизации для *Bacillus subtilis* (последний запуск):
+### 💻 User Interfaces
+* **Web UI (Streamlit):** Interactive dashboard with Plotly visualizations, PDF reports, and GenBank export.
+* **CLI:** Command-line interface for CI/CD pipelines and headless servers.
+* **Batch Processing:** Optimize hundreds of sequences at once via multi-FASTA upload.
 
-| Последовательность   | Длина (aa) | Приспособленность | Время (с) | GC Content | CAI    |
-|----------------------|------------|-------------------|-----------|------------|--------|
-| ShortPeptide         | 6          | 3.5210            | 5.12      | 0.500      | 0.8921 |
+---
 
-## Установка
+## ⚙️ Installation
 
-### Требования
-- Python 3.8+
-- Системные зависимости: `viennarna` (для RNAfold)
+### Prerequisites
+* Python 3.8+
+* [ViennaRNA](https://www.tbi.univie.ac.at/RNA/) (Required for RNA folding metrics)
 
-### Установка через `pip`
-1. Клонируйте репозиторий:
-   ```bash
-   git clone https://github.com/PavelShestun/OpGene.git
-   cd OpGene
-   ```
-2. Установите зависимости:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. (Для Linux) Установите ViennaRNA:
-   ```bash
-   sudo apt-get install -y viennarna
-   ```
-
-### Установка через `conda`
-1. Клонируйте репозиторий:
-   ```bash
-   git clone https://github.com/PavelShestun/OpGene.git
-   cd OpGene
-   ```
-2. Создайте и активируйте окружение:
-   ```bash
-   conda env create -f environment.yml
-   conda activate codon_optimization
-   ```
-
-### Для Google Colab
-1. Клонируйте репозиторий в Colab:
-   ```bash
-   !git clone https://github.com/PavelShestun/OpGene.git
-   %cd OpGene
-   ```
-2. Установите зависимости:
-   ```bash
-   !apt-get install -y viennarna
-   !pip install -r requirements.txt
-   ```
-3. Откройте `src/run_notebook.ipynb` и следуйте инструкциям.
-
-## Использование
-
-### Выбор организма
-Скрипт позволяет оптимизировать кодонное использование для разных бактерий. Для этого нужно указать:
-- Название организма (например, `Bacillus subtilis`).
-- NCBI Taxonomy ID (например, `1423` для *Bacillus subtilis*).
-- (Опционально) ID таблицы кодонов (по умолчанию 11 — стандартный генетический код).
-
-Примеры организмов:
-- *Escherichia coli* K-12: TaxID `83333`
-- *Bacillus subtilis*: TaxID `1423`
-- *Streptomyces coelicolor*: TaxID `1902`
-
-### Использование локальной таблицы кодонов
-Если вы хотите избежать загрузки данных через Entrez, создайте файл `data/<organism_name>_codon_usage.txt` (например, `data/Bacillus_subtilis_codon_usage.txt`) с таблицей кодонов в формате:
+### 1. System Dependencies (Linux/Ubuntu)
+```bash
+sudo apt-get update
+sudo apt-get install -y viennarna
 ```
-# Таблица кодонов для Bacillus subtilis
-TTT 0.015
-TTC 0.025
-ATG 0.035
-...
+
+### 2. Python Environment Setup
+We recommend using Conda to easily manage the ViennaRNA dependency and Python packages.
+
+```bash
+git clone https://github.com/PavelShestun/OpGene.git
+cd OpGene
+
+# Create and activate conda environment
+conda env create -f environment.yml
+conda activate codon_optimization
+
+# Install additional UI dependencies (if using the Web App)
+pip install streamlit plotly pandas fpdf
 ```
-Скрипт автоматически загрузит эту таблицу вместо обращения к Entrez.
 
-### Параметры rna_folding
-- `window_size`: Размер окна для анализа мРНК (по умолчанию 40).
-- `ideal_mfe`: Идеальное значение MFE (по умолчанию -4.0).
-- `bad_mfe`: Пороговое значение MFE, ниже которого сворачивание считается слишком сильным (по умолчанию -12.0).
+---
 
-### Запуск через консоль
-1. Установите email для Entrez (если не используете локальную таблицу):
-   ```bash
-   export ENTREZ_EMAIL="your_email@example.com"
-   ```
-2. Запустите скрипт для *Bacillus subtilis*:
-   ```bash
-   python run.py --organism "Bacillus subtilis" --organism-id "1423"
-   ```
-3. (Опционально) Укажите `--show-plots` для отображения графиков:
-   ```bash
-   python run.py --organism "Bacillus subtilis" --organism-id "1423" --show-plots
-   ```
+## 🚀 Usage
 
-### Запуск тестов
-1. Убедитесь, что зависимости установлены:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Запустите тесты:
-   ```bash
-   python tests.py
-   ```
+### Option A: Web Interface (Recommended)
+OpGene comes with a rich, interactive web application.
+```bash
+streamlit run app.py
+```
+* **Single Mode:** Paste your amino acid sequence, tweak weights, and watch the evolutionary algorithm run. Export results as FASTA, GenBank (`.gb`), or a comprehensive PDF report.
+* **Batch Mode:** Upload a `.fasta` file containing multiple protein sequences to optimize them all sequentially and download a summary CSV.
 
-## Структура проекта
-- `src/codon_optimizer.py`: Основной код оптимизации.
-- `tests.py`: Тесты для проверки функциональности.
-- `config.json`: Конфигурация параметров оптимизации.
-- `data/`: Папка для хранения FASTA файлов и таблиц кодонов.
-- `optimization_results/`: Папка для результатов оптимизации (FASTA файлы, графики, сводка).
+### Option B: Command Line Interface (CLI)
+For quick headless execution or script integration:
+```bash
+export ENTREZ_EMAIL="your_email@example.com"
 
-## Лицензия
-MIT License. См. `LICENSE` для подробностей.
+python src/run.py \
+  --organism "Escherichia coli K-12" \
+  --taxid 83333 \
+  --sequence "MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTFSYGVQCFSRY" \
+  --out optimized.fasta
+```
+
+---
+
+## 🧠 Under the Hood (Architecture)
+
+OpGene uses an Object-Oriented architecture based on the **Strategy Pattern** for objective evaluation:
+
+* `OrganismFactory`: Automatically fetches and caches genomic data, Codon Usage Tables, and Codon Pair Scores (CPS) directly from NCBI Entrez using the target organism's Taxonomy ID.
+* `GeneticOptimizer`: The core evolutionary engine. It starts with a mixed population (greedy + random) and applies selection, synonymous mutations, and elitism over multiple generations.
+* **Objectives Framework** (`src/opgene/objectives/`):
+  * `CodonAdaptationObjective`
+  * `CodonPairObjective`
+  * `GcContentObjective`
+  * `MotifAvoidanceObjective`
+  * `RnaFoldingObjective`
+  * `RepeatAvoidanceObjective`
+  * `BiosecurityObjective`
+
+---
+
+## 📁 Project Structure
+
+```text
+OpGene/
+├── app.py                      # Streamlit Web Dashboard
+├── src/
+│   ├── run.py                  # CLI Entrypoint
+│   └── opgene/                 # Core Library
+│       ├── algorithms/         # Genetic and Memetic optimizers
+│       ├── objectives/         # Fitness functions (GC, CAI, CPB, etc.)
+│       ├── utils/              # PDF reporting, GenBank export
+│       ├── factory.py          # Organism profile creation
+│       ├── data_loaders.py     # NCBI Entrez integrations
+│       └── models.py           # Dataclasses & Enums
+├── environment.yml             # Conda environment specs
+└── export_codebase.py          # Utility script for LLM codebase dumping
+```
+
+---
+
+## 🤝 Contributing
+Contributions are welcome! If you want to add new fitness objectives (e.g., Deep Learning based translation efficiency predictors), please fork the repository and submit a Pull Request.
+
+## 📄 License
+This project is licensed under the MIT License. See the `LICENSE` file for details.
