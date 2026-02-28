@@ -1,0 +1,832 @@
+PROJECT DUMP: /home/shestun/OpGene
+============================================================
+
+
+==================== FILE: export_codebase.py ====================
+import os
+
+# Настройки
+OUTPUT_FILE = "project_dump.txt"
+# Расширения файлов, которые мы хотим включить в дамп
+INCLUDE_EXTENSIONS = {'.py', '.json', '.yml', '.txt', '.md'}
+# Папки, которые нужно игнорировать (чтобы не забить файл мусором)
+IGNORE_DIRS = {'.git', '__pycache__', 'data', 'optimization_results', 'logs', '.venv', 'venv'}
+
+def export_project_code():
+    project_root = os.getcwd()
+    
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as outfile:
+        outfile.write(f"PROJECT DUMP: {project_root}\n")
+        outfile.write("="*60 + "\n\n")
+        
+        for root, dirs, files in os.walk(project_root):
+            # Модифицируем dirs на месте, чтобы os.walk не заходил в игнорируемые папки
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            
+            for file in files:
+                # Игнорируем сам файл дампа и скрытые файлы (кроме .json/.yml/.md)
+                if file == OUTPUT_FILE or file.startswith('.'):
+                    continue
+                
+                file_path = os.path.join(root, file)
+                extension = os.path.splitext(file)[1]
+                
+                if extension in INCLUDE_EXTENSIONS:
+                    relative_path = os.path.relpath(file_path, project_root)
+                    
+                    try:
+                        with open(file_path, "r", encoding="utf-8") as infile:
+                            content = infile.read()
+                            
+                        outfile.write(f"\n{'='*20} FILE: {relative_path} {'='*20}\n")
+                        outfile.write(content)
+                        outfile.write(f"\n{'='*20} END OF FILE: {relative_path} {'='*20}\n")
+                        print(f"Added: {relative_path}")
+                        
+                    except Exception as e:
+                        print(f"Skipped {relative_path}: {e}")
+
+    print(f"\nDone! All code exported to {OUTPUT_FILE}")
+
+if __name__ == "__main__":
+    export_project_code()
+
+==================== END OF FILE: export_codebase.py ====================
+
+==================== FILE: environment.yml ====================
+name: codon_optimization
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.8
+  - biopython=1.83
+  - matplotlib=3.7.1
+  - psutil=5.9.5
+  - viennarna
+
+==================== END OF FILE: environment.yml ====================
+
+==================== FILE: run.py ====================
+import os
+from src.codon_optimizer import CodonOptimizationApp
+
+if __name__ == "__main__":
+    # Установите ваш email для Entrez
+    os.environ["ENTREZ_EMAIL"] = "your_email@example.com"
+    
+    app = CodonOptimizationApp()
+    app.run(show_plots=False)
+
+==================== END OF FILE: run.py ====================
+
+==================== FILE: README.md ====================
+
+# Оптимизация кодонов
+
+Этот проект реализует скрипт для оптимизации кодонов с использованием меметического алгоритма. Код адаптирован для работы как через консоль, так и через Jupyter Notebook, включая поддержку Google Colab. Проект включает установку зависимостей, запуск оптимизации и тестирование.
+
+## Описание проекта
+
+Скрипт оптимизирует ДНК-последовательности для заданных аминокислотных последовательностей, используя следующие критерии:
+- **Codon Usage (CAI)**: Оптимизация использования кодонов для заданного организма (по умолчанию *E. coli* K-12 MG1655).
+- **GC Content**: Поддержание GC-содержания в заданном диапазоне.
+- **Avoid Pattern**: Исключение нежелательных мотивов.
+- **RBS Specification**: Оптимизация расположения Shine-Dalgarno последовательности.
+- **RNA Folding**: Оптимизация стабильности мРНК (требуется ViennaRNA).
+- **Codon Pair Bias (CPB)**: Оптимизация парного использования кодонов.
+
+Оптимизация выполняется с помощью меметического алгоритма, который сочетает генетический алгоритм с локальным поиском.
+
+## Улучшения в коде
+
+### 1. Универсальность для разных бактерий
+- Добавлена поддержка выбора организма через параметры `organism` и `organism_id`.
+- Данные об использовании кодонов загружаются через Entrez API для указанного организма (по NCBI Taxonomy ID).
+- Поддержка различных таблиц кодонов (например, стандартный код, код для Mycoplasma).
+- **Добавлена поддержка локальных таблиц кодонов**: Можно предоставить файл с таблицей кодонов, чтобы избежать загрузки через Entrez.
+
+### 2. Оптимизация скорости загрузки данных
+- Уменьшено количество загружаемых генов через Entrez (`retmax=100`).
+- Добавлена пакетная загрузка генов (по 50 за запрос).
+- Используется параллельная обработка для подсчёта кодонов.
+
+### 3. Результаты
+Результаты оптимизации для *Bacillus subtilis* (последний запуск):
+
+| Последовательность   | Длина (aa) | Приспособленность | Время (с) | GC Content | CAI    |
+|----------------------|------------|-------------------|-----------|------------|--------|
+| ShortPeptide         | 6          | 3.5210            | 5.12      | 0.500      | 0.8921 |
+
+## Установка
+
+### Требования
+- Python 3.8+
+- Системные зависимости: `viennarna` (для RNAfold)
+
+### Установка через `pip`
+1. Клонируйте репозиторий:
+   ```bash
+   git clone https://github.com/PavelShestun/OpGene.git
+   cd OpGene
+   ```
+2. Установите зависимости:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. (Для Linux) Установите ViennaRNA:
+   ```bash
+   sudo apt-get install -y viennarna
+   ```
+
+### Установка через `conda`
+1. Клонируйте репозиторий:
+   ```bash
+   git clone https://github.com/PavelShestun/OpGene.git
+   cd OpGene
+   ```
+2. Создайте и активируйте окружение:
+   ```bash
+   conda env create -f environment.yml
+   conda activate codon_optimization
+   ```
+
+### Для Google Colab
+1. Клонируйте репозиторий в Colab:
+   ```bash
+   !git clone https://github.com/PavelShestun/OpGene.git
+   %cd OpGene
+   ```
+2. Установите зависимости:
+   ```bash
+   !apt-get install -y viennarna
+   !pip install -r requirements.txt
+   ```
+3. Откройте `src/run_notebook.ipynb` и следуйте инструкциям.
+
+## Использование
+
+### Выбор организма
+Скрипт позволяет оптимизировать кодонное использование для разных бактерий. Для этого нужно указать:
+- Название организма (например, `Bacillus subtilis`).
+- NCBI Taxonomy ID (например, `1423` для *Bacillus subtilis*).
+- (Опционально) ID таблицы кодонов (по умолчанию 11 — стандартный генетический код).
+
+Примеры организмов:
+- *Escherichia coli* K-12: TaxID `83333`
+- *Bacillus subtilis*: TaxID `1423`
+- *Streptomyces coelicolor*: TaxID `1902`
+
+### Использование локальной таблицы кодонов
+Если вы хотите избежать загрузки данных через Entrez, создайте файл `data/<organism_name>_codon_usage.txt` (например, `data/Bacillus_subtilis_codon_usage.txt`) с таблицей кодонов в формате:
+```
+# Таблица кодонов для Bacillus subtilis
+TTT 0.015
+TTC 0.025
+ATG 0.035
+...
+```
+Скрипт автоматически загрузит эту таблицу вместо обращения к Entrez.
+
+### Параметры rna_folding
+- `window_size`: Размер окна для анализа мРНК (по умолчанию 40).
+- `ideal_mfe`: Идеальное значение MFE (по умолчанию -4.0).
+- `bad_mfe`: Пороговое значение MFE, ниже которого сворачивание считается слишком сильным (по умолчанию -12.0).
+
+### Запуск через консоль
+1. Установите email для Entrez (если не используете локальную таблицу):
+   ```bash
+   export ENTREZ_EMAIL="your_email@example.com"
+   ```
+2. Запустите скрипт для *Bacillus subtilis*:
+   ```bash
+   python run.py --organism "Bacillus subtilis" --organism-id "1423"
+   ```
+3. (Опционально) Укажите `--show-plots` для отображения графиков:
+   ```bash
+   python run.py --organism "Bacillus subtilis" --organism-id "1423" --show-plots
+   ```
+
+### Запуск тестов
+1. Убедитесь, что зависимости установлены:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Запустите тесты:
+   ```bash
+   python tests.py
+   ```
+
+## Структура проекта
+- `src/codon_optimizer.py`: Основной код оптимизации.
+- `tests.py`: Тесты для проверки функциональности.
+- `config.json`: Конфигурация параметров оптимизации.
+- `data/`: Папка для хранения FASTA файлов и таблиц кодонов.
+- `optimization_results/`: Папка для результатов оптимизации (FASTA файлы, графики, сводка).
+
+## Лицензия
+MIT License. См. `LICENSE` для подробностей.
+
+==================== END OF FILE: README.md ====================
+
+==================== FILE: requirements.txt ====================
+biopython==1.83 
+
+matplotlib==3.7.1 
+
+psutil==5.9.5
+
+==================== END OF FILE: requirements.txt ====================
+
+==================== FILE: src/oop_test.py ====================
+import random
+import math
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Optional
+from enum import Enum
+from Bio.Data import CodonTable
+
+# --- Настройка логирования ---
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger("OpGene")
+
+# --- Данные (E. coli K-12 Codon Usage для теста) ---
+DEFAULT_CODON_USAGE = {
+    'TTT': 0.58, 'TTC': 0.42, 'TTA': 0.14, 'TTG': 0.13, 'CTT': 0.12, 'CTC': 0.10,
+    'CTA': 0.04, 'CTG': 0.47, 'ATT': 0.49, 'ATC': 0.39, 'ATA': 0.11, 'ATG': 1.00,
+    'GTT': 0.28, 'GTC': 0.20, 'GTA': 0.17, 'GTG': 0.35, 'TCT': 0.17, 'TCC': 0.15,
+    'TCA': 0.14, 'TCG': 0.14, 'CCT': 0.18, 'CCC': 0.13, 'CCA': 0.20, 'CCG': 0.49,
+    'ACT': 0.19, 'ACC': 0.40, 'ACA': 0.17, 'ACG': 0.25, 'GCT': 0.18, 'GCC': 0.26,
+    'GCA': 0.23, 'GCG': 0.33, 'TAT': 0.59, 'TAC': 0.41, 'CAT': 0.57, 'CAC': 0.43,
+    'CAA': 0.34, 'CAG': 0.66, 'AAT': 0.49, 'AAC': 0.51, 'AAA': 0.74, 'AAG': 0.26,
+    'GAT': 0.63, 'GAC': 0.37, 'GAA': 0.68, 'GAG': 0.32, 'TGT': 0.46, 'TGC': 0.54,
+    'TGG': 1.00, 'CGT': 0.36, 'CGC': 0.36, 'CGA': 0.07, 'CGG': 0.11, 'AGT': 0.16,
+    'AGC': 0.25, 'AGA': 0.07, 'AGG': 0.04, 'GGT': 0.35, 'GGC': 0.37, 'GGA': 0.13,
+    'GGG': 0.15
+}
+
+# --- 1. Models (Сущности) ---
+
+class OrganismType(Enum):
+    PROKARYOTE = "prokaryote"
+    EUKARYOTE = "eukaryote"
+    MAMMALIAN = "mammalian"
+
+@dataclass
+class OrganismProfile:
+    name: str
+    org_type: OrganismType
+    codon_usage: Dict[str, float]
+    codon_table_id: int = 11
+    # SOTA параметры
+    use_ramp_hypothesis: bool = True
+    suppress_cpg: bool = False
+    ideal_gc_range: tuple = (0.45, 0.55)
+    forbidden_motifs: List[str] = field(default_factory=list)
+
+# --- 2. Objectives (Стратегии оценки) ---
+
+@dataclass
+class EvaluationResult:
+    score: float  # 0.0 to 1.0
+    message: str
+
+class OptimizationObjective(ABC):
+    """Интерфейс стратегии"""
+    def __init__(self, weight: float = 1.0):
+        self.weight = weight
+
+    @abstractmethod
+    def evaluate(self, sequence: str) -> EvaluationResult:
+        pass
+    
+    @property
+    def name(self) -> str:
+        return self.__class__.__name__
+
+class CodonAdaptationObjective(OptimizationObjective):
+    """CAI с учетом Ramp Hypothesis (медленный старт трансляции)"""
+    def __init__(self, codon_usage: dict, table_id: int, weight: float = 1.0, use_ramp: bool = True):
+        super().__init__(weight)
+        self.use_ramp = use_ramp
+        self.weights = self._calculate_weights(codon_usage, table_id)
+        self.ramp_length = 15  # Первые 15 кодонов (~45 нуклеотидов)
+
+    def _calculate_weights(self, usage, table_id):
+        table = CodonTable.unambiguous_dna_by_id.get(table_id, CodonTable.standard_dna_table)
+        weights = {}
+        processed_aa = set()
+        for codon, aa in table.forward_table.items():
+            if aa in processed_aa: continue
+            synonyms = [c for c, a in table.forward_table.items() if a == aa]
+            freqs = [usage.get(c, 0.01) for c in synonyms]
+            max_freq = max(freqs) if freqs else 0.01
+            for c in synonyms:
+                weights[c] = usage.get(c, 0.01) / max_freq
+            processed_aa.add(aa)
+        return weights
+
+    def evaluate(self, sequence: str) -> EvaluationResult:
+        if not sequence: return EvaluationResult(0.0, "Empty")
+        
+        # Разделяем последовательность на "Рампу" и "Тело"
+        ramp_len_nt = self.ramp_length * 3
+        if self.use_ramp and len(sequence) > ramp_len_nt:
+            ramp_seq = sequence[:ramp_len_nt]
+            body_seq = sequence[ramp_len_nt:]
+            
+            cai_body = self._calculate_cai(body_seq)
+            cai_ramp = self._calculate_cai(ramp_seq)
+            
+            # SOTA: Рампа должна быть "мягкой" (CAI < 0.7), но не ужасной (CAI > 0.3)
+            # Если рампа слишком быстрая (CAI > 0.8), рибосомы могут столкнуться
+            penalty = 0.0
+            if cai_ramp > 0.8: 
+                penalty = 0.3 # Штраф за слишком быструю инициацию
+                msg = f"Body CAI: {cai_body:.2f} | Ramp too fast ({cai_ramp:.2f})"
+            else:
+                msg = f"Body CAI: {cai_body:.2f} | Ramp OK ({cai_ramp:.2f})"
+            
+            final_score = max(0, cai_body - penalty)
+            return EvaluationResult(final_score, msg)
+        else:
+            cai = self._calculate_cai(sequence)
+            return EvaluationResult(cai, f"CAI: {cai:.2f}")
+
+    def _calculate_cai(self, seq):
+        log_w = 0
+        count = 0
+        for i in range(0, len(seq), 3):
+            c = seq[i:i+3]
+            if c in self.weights:
+                log_w += math.log(max(self.weights[c], 0.001))
+                count += 1
+        return math.exp(log_w/count) if count else 0
+
+class GcContentObjective(OptimizationObjective):
+    """GC-состав: проверка общего процента и локальных пиков"""
+    def __init__(self, target_range: Tuple[float, float], weight: float = 1.0):
+        super().__init__(weight)
+        self.min_gc, self.max_gc = target_range
+        self.window_size = 40
+
+    def evaluate(self, sequence: str) -> EvaluationResult:
+        total_gc = sum(1 for b in sequence if b in "GC") / len(sequence)
+        
+        # Локальная проверка (SOTA)
+        max_deviation = 0.0
+        for i in range(len(sequence) - self.window_size):
+            sub = sequence[i:i+self.window_size]
+            local_gc = sum(1 for b in sub if b in "GC") / len(sub)
+            if local_gc > 0.8 or local_gc < 0.2: # Экстремальные значения
+                max_deviation = 1.0
+        
+        score = 1.0
+        if not (self.min_gc <= total_gc <= self.max_gc):
+            score -= abs(total_gc - (self.min_gc + self.max_gc)/2) * 2
+        
+        if max_deviation > 0:
+            score -= 0.3 # Штраф за локальные пики
+            return EvaluationResult(max(0, score), f"GC: {total_gc:.2f} (Local peaks found!)")
+        
+        return EvaluationResult(max(0, score), f"GC: {total_gc:.2f}")
+
+class MotifAvoidanceObjective(OptimizationObjective):
+    """Избегание запрещенных мотивов и гомополимеров"""
+    def __init__(self, motifs: List[str], weight: float = 1.0):
+        super().__init__(weight)
+        self.motifs = motifs
+        self.homopolymers = [b*5 for b in "ACGT"] # AAAAA, CCCCC...
+
+    def evaluate(self, sequence: str) -> EvaluationResult:
+        penalty = 0.0
+        found = []
+        for m in self.motifs + self.homopolymers:
+            if m in sequence:
+                penalty += 0.5
+                found.append(m)
+        
+        score = max(0.0, 1.0 - penalty)
+        msg = f"Clean" if score == 1.0 else f"Found: {', '.join(found[:3])}"
+        return EvaluationResult(score, msg)
+
+# --- 3. Optimizer (Алгоритм) ---
+
+class GeneticOptimizer:
+    def __init__(self, objectives: List[OptimizationObjective], profile: OrganismProfile):
+        self.objectives = objectives
+        self.profile = profile
+        self.back_table = self._build_back_table()
+
+    def _build_back_table(self):
+        table = CodonTable.unambiguous_dna_by_id.get(self.profile.codon_table_id, CodonTable.standard_dna_table)
+        bt = {}
+        for codon, aa in table.forward_table.items():
+            if aa != '*': bt.setdefault(aa, []).append(codon)
+        return bt
+
+    def calculate_fitness(self, dna: str) -> float:
+        total = 0.0
+        for obj in self.objectives:
+            res = obj.evaluate(dna)
+            total += res.score * obj.weight
+        return total
+
+    def run(self, aa_seq: str, pop_size=20, generations=15) -> Tuple[str, Dict]:
+        # 1. Init Population
+        population = []
+        # Add Greedy
+        population.append("".join([self.back_table[aa][0] for aa in aa_seq]))
+        # Add Random
+        for _ in range(pop_size - 1):
+            dna = "".join([random.choice(self.back_table[aa]) for aa in aa_seq])
+            population.append(dna)
+
+        best_dna = population[0]
+        best_fit = self.calculate_fitness(best_dna)
+
+        # 2. Evolution Loop
+        for gen in range(generations):
+            scores = [(dna, self.calculate_fitness(dna)) for dna in population]
+            scores.sort(key=lambda x: x[1], reverse=True)
+            
+            if scores[0][1] > best_fit:
+                best_dna, best_fit = scores[0]
+            
+            # Simple Selection & Mutation (Prototyping)
+            new_pop = [scores[0][0], scores[1][0]] # Elitism
+            while len(new_pop) < pop_size:
+                parent = random.choice(scores[:5])[0] # Top 5
+                # Mutation
+                child_list = list(parent)
+                idx = random.randint(0, len(aa_seq)-1) * 3
+                aa = aa_seq[idx//3]
+                child_list[idx:idx+3] = list(random.choice(self.back_table[aa]))
+                new_pop.append("".join(child_list))
+            
+            population = new_pop
+            if gen % 5 == 0:
+                logger.info(f"Gen {gen}: Best Fitness = {best_fit:.4f}")
+
+        # 3. Final Report
+        metrics = {}
+        for obj in self.objectives:
+            res = obj.evaluate(best_dna)
+            metrics[obj.name] = {"score": res.score, "msg": res.message}
+        
+        return best_dna, {"fitness": best_fit, "metrics": metrics}
+
+# --- 4. Main (Facade) ---
+
+def main():
+    logger.info("--- Starting OpGene OOP Test ---")
+    
+    # 1. Создаем профиль (как бы из Фабрики)
+    # Пример: Bacillus subtilis (Prokaryote)
+    profile = OrganismProfile(
+        name="Bacillus_subtilis_Mock",
+        org_type=OrganismType.PROKARYOTE,
+        codon_usage=DEFAULT_CODON_USAGE, # В реальности загружаем из Entrez
+        use_ramp_hypothesis=True,
+        forbidden_motifs=["GGGGGG", "CCCCCC"]
+    )
+    
+    # 2. Настраиваем цели (Strategy)
+    objectives = [
+        CodonAdaptationObjective(profile.codon_usage, profile.codon_table_id, weight=1.5, use_ramp=True),
+        GcContentObjective(target_range=(0.4, 0.6), weight=1.0),
+        MotifAvoidanceObjective(motifs=profile.forbidden_motifs, weight=2.0)
+    ]
+    
+    # 3. Тестовая последовательность (GFP фрагмент)
+    aa_sequence = "MSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTFSYGVQCFSRY"
+    
+    logger.info(f"Organism: {profile.name}")
+    logger.info(f"Sequence Length: {len(aa_sequence)} aa")
+    
+    # 4. Запуск
+    optimizer = GeneticOptimizer(objectives, profile)
+    best_dna, results = optimizer.run(aa_sequence, pop_size=50, generations=20)
+    
+    # 5. Вывод
+    print("\n" + "="*30)
+    print("OPTIMIZATION RESULTS")
+    print("="*30)
+    print(f"Final DNA: {best_dna}")
+    print(f"Total Fitness: {results['fitness']:.4f}")
+    print("\nDetailed Metrics:")
+    for name, data in results['metrics'].items():
+        print(f"  [{name}]: {data['score']:.2f} -> {data['msg']}")
+    print("="*30)
+
+if __name__ == "__main__":
+    main()
+
+==================== END OF FILE: src/oop_test.py ====================
+
+==================== FILE: src/run.py ====================
+import argparse
+import logging
+from src.opgene.factory import OrganismFactory
+from src.opgene.objectives.codon_usage import CodonAdaptationObjective
+from src.opgene.objectives.structure import GcContentObjective, RnaFoldingObjective
+from src.opgene.objectives.motifs import MotifAvoidanceObjective
+from src.opgene.algorithms.genetic import GeneticOptimizer
+
+# Настройка логгера
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("OpGene")
+
+def main():
+    parser = argparse.ArgumentParser(description="OpGene: SOTA Codon Optimizer")
+    parser.add_argument("--organism", type=str, required=True, help="Target organism name")
+    parser.add_argument("--taxid", type=str, required=True, help="NCBI Taxonomy ID")
+    parser.add_argument("--sequence", type=str, required=True, help="Amino acid sequence")
+    args = parser.parse_args()
+
+    # 1. Создание профиля организма
+    logger.info(f"Loading profile for {args.organism}...")
+    profile = OrganismFactory.create(args.organism, args.taxid)
+
+    # 2. Настройка целей (Objectives)
+    objectives = [
+        CodonAdaptationObjective(
+            profile.codon_usage, 
+            profile.codon_table_id, 
+            weight=1.5,
+            use_ramp=profile.use_ramp_hypothesis
+        ),
+        GcContentObjective(
+            target_range=profile.ideal_gc_range,
+            weight=1.0
+        ),
+        MotifAvoidanceObjective(
+            forbidden=profile.forbidden_motifs,
+            suppress_cpg=profile.suppress_cpg,
+            weight=5.0 # Критически важно
+        ),
+        RnaFoldingObjective(weight=2.0) # Требует ViennaRNA
+    ]
+
+    # 3. Инициализация оптимизатора
+    optimizer = GeneticOptimizer(objectives, pop_size=50, generations=30)
+
+    # 4. Запуск
+    logger.info("Starting optimization...")
+    dna_seq, metrics = optimizer.run(args.sequence, profile)
+
+    # 5. Результат
+    print("\n--- Result ---")
+    print(f"Optimized DNA: {dna_seq}")
+    print(f"Final Fitness: {metrics['fitness']:.4f}")
+
+if __name__ == "__main__":
+    main()
+
+==================== END OF FILE: src/run.py ====================
+
+==================== FILE: src/config.json ====================
+{
+  "spec_weights": {
+    "CodonUsage": 1.2,
+    "GcContent": 1.0,
+    "AvoidPattern": 1.5,
+    "RnaFolding5Prime": 0.8,
+    "CodonPairBias": 1.0,
+    "RbsSpecification": 0.5
+  },
+  "ma_parameters": {
+    "population_size": 10,
+    "num_generations": 5,
+    "crossover_rate": 0.85,
+    "mutation_rate": 0.06,
+    "tournament_size": 4,
+    "elitism_count": 2,
+    "local_search_steps": 3
+  },
+  "rna_folding": {
+    "window_size": 40,
+    "bad_mfe": -12.0,
+    "ideal_mfe": -4.0
+  },
+  "cpb_parameters": {
+    "sigmoid_k": 3.0,
+    "sigmoid_center": 0.0
+  },
+  "target_gc_range": [0.45, 0.55],
+  "avoid_motifs": [
+    "AATAAA", "GATC", "TATAAT", "GGGGGG", "CCCCCC", "AAAAAA", "TTTTTT"
+  ],
+  "default_codon_table": 11
+}
+==================== END OF FILE: src/config.json ====================
+
+==================== FILE: src/opgene/__init__.py ====================
+
+==================== END OF FILE: src/opgene/__init__.py ====================
+
+==================== FILE: src/opgene/models.py ====================
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from enum import Enum
+
+class OrganismType(Enum):
+    PROKARYOTE = "prokaryote"
+    EUKARYOTE = "eukaryote"
+    MAMMALIAN = "mammalian"
+
+@dataclass
+class OrganismProfile:
+    name: str
+    tax_id: str
+    org_type: OrganismType
+    codon_table_id: int = 11
+    codon_usage: Dict[str, float] = field(default_factory=dict)
+    forbidden_motifs: List[str] = field(default_factory=list)
+    
+    # SOTA параметры
+    use_ramp_hypothesis: bool = True
+    suppress_cpg: bool = False  # Для млекопитающих
+    ideal_gc_range: tuple = (0.4, 0.6)
+
+    def __post_init__(self):
+        # Автоматическая настройка SOTA-правил в зависимости от типа
+        if self.org_type == OrganismType.MAMMALIAN:
+            self.suppress_cpg = True
+            self.ideal_gc_range = (0.45, 0.65)
+            self.forbidden_motifs.extend(["GGTAAG", "GGTGAT"]) # Splice sites
+        elif self.org_type == OrganismType.PROKARYOTE:
+            self.use_ramp_hypothesis = True
+            self.ideal_gc_range = (0.35, 0.60)
+
+==================== END OF FILE: src/opgene/models.py ====================
+
+==================== FILE: src/opgene/factory.py ====================
+from .models import OrganismProfile, OrganismType
+from .data_loaders import EntrezDataLoader
+
+class OrganismFactory:
+    @staticmethod
+    def create(name: str, tax_id: str = None) -> OrganismProfile:
+        name_lower = name.lower()
+        
+        # Определение типа
+        if any(x in name_lower for x in ["coli", "subtilis", "bacterium"]):
+            org_type = OrganismType.PROKARYOTE
+        elif any(x in name_lower for x in ["sapiens", "human", "mus", "cho", "hella"]):
+            org_type = OrganismType.MAMMALIAN
+        else:
+            org_type = OrganismType.EUKARYOTE
+
+        # Загрузка данных (можно использовать Dependency Injection)
+        loader = EntrezDataLoader()
+        codon_usage = loader.load_codon_usage(tax_id or name) # Упрощенно
+        
+        return OrganismProfile(
+            name=name,
+            tax_id=tax_id,
+            org_type=org_type,
+            codon_usage=codon_usage
+        )
+
+==================== END OF FILE: src/opgene/factory.py ====================
+
+==================== FILE: src/opgene/algorithms/base.py ====================
+import random
+from abc import ABC, abstractmethod
+from typing import List, Tuple, Dict
+from ..objectives.base import OptimizationObjective
+from ..models import OrganismProfile
+
+class BaseOptimizer(ABC):
+    def __init__(self, objectives: List[OptimizationObjective]):
+        self.objectives = objectives
+
+    def calculate_fitness(self, sequence: str) -> float:
+        total_score = 0.0
+        for obj in self.objectives:
+            res = obj.evaluate(sequence)
+            total_score += res.score * obj.weight
+        return total_score
+
+    @abstractmethod
+    def run(self, aa_sequence: str, profile: OrganismProfile) -> Tuple[str, Dict]:
+        pass
+
+# genetic.py
+class GeneticOptimizer(BaseOptimizer):
+    def __init__(self, objectives: List[OptimizationObjective], pop_size=30, generations=20):
+        super().__init__(objectives)
+        self.pop_size = pop_size
+        self.generations = generations
+        # Back translation table будет строиться внутри run или передаваться
+
+    def run(self, aa_sequence: str, profile: OrganismProfile) -> Tuple[str, Dict]:
+        # Инициализация population
+        # Цикл поколений (Selection, Crossover, Mutation)
+        # Логика аналогична предыдущей, но теперь использует self.objectives
+        pass
+
+==================== END OF FILE: src/opgene/algorithms/base.py ====================
+
+==================== FILE: src/opgene/algorithms/__init__.py ====================
+
+==================== END OF FILE: src/opgene/algorithms/__init__.py ====================
+
+==================== FILE: src/opgene/objectives/base.py ====================
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+@dataclass
+class EvaluationResult:
+    score: float  # 0.0 to 1.0
+    message: str
+    is_critical: bool = False # Если True и score низкий -> штраф x100
+
+class OptimizationObjective(ABC):
+    """Базовый класс для любой спецификации оптимизации."""
+    
+    def __init__(self, weight: float = 1.0):
+        self.weight = weight
+
+    @abstractmethod
+    def evaluate(self, sequence: str) -> EvaluationResult:
+        pass
+    
+    @property
+    def name(self) -> str:
+        return self.__class__.__name__
+
+==================== END OF FILE: src/opgene/objectives/base.py ====================
+
+==================== FILE: src/opgene/objectives/__init__.py ====================
+
+==================== END OF FILE: src/opgene/objectives/__init__.py ====================
+
+==================== FILE: src/opgene/objectives/codon_usage.py ====================
+import math
+from Bio.Data import CodonTable
+from .base import OptimizationObjective, EvaluationResult
+
+class CodonAdaptationObjective(OptimizationObjective):
+    def __init__(self, codon_usage: dict, table_id: int, weight: float = 1.0, use_ramp: bool = True):
+        super().__init__(weight)
+        self.codon_usage = codon_usage
+        self.table_id = table_id
+        self.use_ramp = use_ramp
+        self.weights = self._calculate_relative_adaptiveness()
+        self.ramp_length = 15 # Первые 15 кодонов
+
+    def _calculate_relative_adaptiveness(self) -> dict:
+        # Логика расчета W (relative adaptiveness)
+        table = CodonTable.unambiguous_dna_by_id.get(self.table_id, CodonTable.standard_dna_table)
+        weights = {}
+        for aa, codons in self._get_synonymous_codons(table).items():
+            freqs = [self.codon_usage.get(c, 0.01) for c in codons]
+            max_freq = max(freqs) if freqs else 1.0
+            for c in codons:
+                weights[c] = self.codon_usage.get(c, 0.01) / max_freq
+        return weights
+
+    def _get_synonymous_codons(self, table) -> dict:
+        syn = {}
+        for codon, aa in table.forward_table.items():
+            syn.setdefault(aa, []).append(codon)
+        return syn
+
+    def evaluate(self, sequence: str) -> EvaluationResult:
+        if not sequence: return EvaluationResult(0.0, "Empty")
+        
+        # SOTA: Ramp handling
+        # Если включен Ramp, мы оцениваем тело гена жестко, а начало - мягче
+        
+        start_idx = self.ramp_length * 3 if (self.use_ramp and len(sequence) > 100) else 0
+        body_seq = sequence[start_idx:]
+        
+        cai_score = self._calculate_cai(body_seq)
+        
+        msg = f"CAI: {cai_score:.3f}"
+        if self.use_ramp and start_idx > 0:
+            ramp_seq = sequence[:start_idx]
+            ramp_cai = self._calculate_cai(ramp_seq)
+            # Рампа не должна быть слишком быстрой (>0.8)
+            if ramp_cai > 0.8:
+                return EvaluationResult(cai_score * 0.5, f"CAI: {cai_score:.3f} (Ramp too fast!)", is_critical=False)
+        
+        return EvaluationResult(cai_score, msg)
+
+    def _calculate_cai(self, seq: str) -> float:
+        if not seq: return 0.0
+        log_w = 0.0
+        count = 0
+        for i in range(0, len(seq), 3):
+            codon = seq[i:i+3]
+            if len(codon) == 3 and codon in self.weights:
+                log_w += math.log(max(self.weights[codon], 0.001))
+                count += 1
+        return math.exp(log_w / count) if count else 0.0
+
+==================== END OF FILE: src/opgene/objectives/codon_usage.py ====================

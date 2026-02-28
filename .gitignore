@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 optimization_results/
 data/
+__pycache__/
+.DS_Store
